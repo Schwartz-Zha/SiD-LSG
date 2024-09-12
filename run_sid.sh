@@ -56,11 +56,12 @@ model=$1
 # --gradient_checkpointing 1
 
 
-
+# rlaunch --charged-group=monet_video --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash eval_imagenet.sh
+# rlaunch --charged-group=midjourney --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash eval_imagenet.sh
 
 if [ "$model" = 'sd1.5' ]; then
     # Command to run torch with specific parameters
-    torchrun --standalone --nproc_per_node=4 sid_train.py \
+    torchrun --standalone --nproc_per_node=8 sid_train.py \
     --outdir 'image_experiment/sid-lsg-train-runs/' \
     --data '/data/datasets/MS-COCO-256/val' \
     --train_mode 1 \
@@ -73,9 +74,9 @@ if [ "$model" = 'sd1.5' ]; then
     --alpha 1 \
     --init_timestep 625 \
     --batch 512 \
-    --fp16 0 \
+    --fp16 1 \
     --batch-gpu 1 \
-    --sd_model "runwayml/stable-diffusion-v1-5" \
+    --sd_model "benjamin-paine/stable-diffusion-v1-5" \
     --tick 2 \
     --snap 50 \
     --dump 100 \

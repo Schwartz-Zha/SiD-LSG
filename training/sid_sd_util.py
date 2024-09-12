@@ -67,7 +67,7 @@ def load_sd15(pretrained_model_name_or_path, pretrained_vae_model_name_or_path, 
         noise_scheduler = DDIMScheduler.from_pretrained(pretrained_model_name_or_path, subfolder="scheduler")
         noise_scheduler.set_timesteps(noise_scheduler.config.num_train_timesteps)
     
-    text_encoder = CLIPTextModel.from_pretrained(pretrained_model_name_or_path,subfolder="text_encoder", revision=revision, variant=variant
+    text_encoder = CLIPTextModel.from_pretrained(pretrained_model_name_or_path,subfolder="text_encoder", revision=revision, variant=None
     )
 
     vae = AutoencoderKL.from_pretrained(
