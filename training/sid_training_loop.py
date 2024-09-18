@@ -313,11 +313,11 @@ def training_loop(
             misc.copy_params_and_buffers(src_module=data['fake_score'], dst_module=fake_score, require_all=True)
             misc.copy_params_and_buffers(src_module=data['G'], dst_module=G, require_all=True)
             if ema_halflife_kimg>0:
-                G_ema = copy.deepcopy(G).eval().requires_grad_(False)
+                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
                 misc.copy_params_and_buffers(src_module=data['G_ema'], dst_module=G_ema, require_all=True)
-                G_ema.eval().requires_grad_(False)
+                G_ema.eval().requires_grad_(False).cpu()
             else:
-                G_ema=G
+                G_ema=copy.deepcopy(G).eval().requires_grad_(False).cpu()
             fake_score_optimizer.load_state_dict(data['fake_score_optimizer_state'])
             g_optimizer.load_state_dict(data['g_optimizer_state'])
             del data # conserve memory
@@ -336,9 +336,9 @@ def training_loop(
             fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
             G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
             if ema_halflife_kimg>0:
-                G_ema = copy.deepcopy(G).eval().requires_grad_(False)
+                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
             else:
-                G_ema = G
+                G_ema = G.cpu()
     
 
         fake_score_ddp.eval().requires_grad_(False)        
@@ -369,7 +369,7 @@ def training_loop(
                     
                 
                 print('Exporting sample fake images at initialization...')
-                images = [sid_sd_sampler(unet=G_ema,latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+                images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
                                              noise_scheduler=noise_scheduler,
                                              text_encoder=text_encoder, tokenizer=tokenizer, 
                                              resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1) for z, c in zip(grid_z, grid_c)]
@@ -584,9 +584,12 @@ def training_loop(
                 for p_ema, p_true_score in zip(G_ema.parameters(), G.parameters()):
                     #p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
                     with torch.no_grad():  
-                        p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
+                        p_ema.copy_(p_true_score.detach().cpu().lerp(p_ema, ema_beta))
             else:
-                G_ema=G
+                for p_ema, p_true_score in zip(G_ema.parameters(), G.parameters()):
+                    #p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
+                    with torch.no_grad():  
+                        p_ema.copy_(p_true_score.detach().cpu())
     
             cur_nimg += batch_size
             done = (cur_nimg >= total_kimg * 1000)
@@ -625,7 +628,7 @@ def training_loop(
                     for num_steps_eval in [1,2,4]:
                         #While the generator is primarily trained to generate images in a single step, it can also be utilized in a multi-step setting during evaluation.
                         #To do: Distill a multi-step generator that is optimized for multi-step settings
-                        images = [sid_sd_sampler(unet=G_ema,latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+                        images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
                                                  noise_scheduler=noise_scheduler,
                                                  text_encoder=text_encoder, tokenizer=tokenizer, 
                                                  resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
@@ -650,7 +653,7 @@ def training_loop(
 
 
                             result_dict = metric_main.calc_metric(metric=metric, metric_pt_path=metric_pt_path, metric_open_clip_path=metric_open_clip_path, metric_clip_path=metric_clip_path,
-                                G=partial(sid_sd_sampler,unet=G_ema,noise_scheduler=noise_scheduler,
+                                G=partial(sid_sd_sampler,unet=G_ema.to(device),noise_scheduler=noise_scheduler,
                                                          text_encoder=text_encoder, tokenizer=tokenizer, 
                                                          resolution=resolution,dtype=dtype,return_images=True,vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1),
                                 init_timestep=init_timestep,
@@ -665,9 +668,9 @@ def training_loop(
                 data = dict(ema=G_ema)
                 for key, value in data.items():
                     if isinstance(value, torch.nn.Module):
-                        value = copy.deepcopy(value).eval().requires_grad_(False)
+                        # value = copy.deepcopy(value).eval().requires_grad_(False).cpu()
                         # misc.check_ddp_consistency(value)
-                        data[key] = value.cpu()
+                        data[key] = copy.deepcopy(value.cpu())
                     del value # conserve memory
                     
                 if dist.get_rank() == 0:
@@ -708,7 +711,7 @@ def training_loop(
         #compute FID using a pkl file
         dist.print0(f'Loading network from "{network_pkl}"...')
         with dnnlib.util.open_url(network_pkl, verbose=(dist.get_rank() == 0)) as f:
-            G_ema = pickle.load(f)['ema'].to(device)
+            G_ema = pickle.load(f)['ema'].cpu()
         dist.print0(f'Finished loading "{network_pkl}"...')
 
         dist.print0(dataset_kwargs)
@@ -747,7 +750,7 @@ def training_loop(
         for num_steps_eval in [1,2,4]:
             for metric in metrics:
                 if dist.get_rank() == 0:
-                    images = [sid_sd_sampler(unet=G_ema,latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+                    images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
                                              noise_scheduler=noise_scheduler,
                                              text_encoder=text_encoder, tokenizer=tokenizer, 
                                              resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
@@ -757,7 +760,7 @@ def training_loop(
                 del images
                 
                 result_dict =  metric_main.calc_metric(metric=metric, metric_pt_path=metric_pt_path, metric_open_clip_path=metric_open_clip_path, metric_clip_path=metric_clip_path,
-                    G=partial(sid_sd_sampler,unet=G_ema,noise_scheduler=noise_scheduler,
+                    G=partial(sid_sd_sampler,unet=G_ema.to(device),noise_scheduler=noise_scheduler,
                                              text_encoder=text_encoder, tokenizer=tokenizer, 
                                              resolution=resolution,dtype=dtype,return_images=True,vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval),
                     init_timestep=init_timestep,
