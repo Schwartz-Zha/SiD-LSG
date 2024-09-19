@@ -65,16 +65,16 @@ if [ "$model" = 'sd1.5' ]; then
     --outdir 'image_experiment/sid-lsg-train-runs/' \
     --data '/data/datasets/MS-COCO-256/val' \
     --train_mode 1 \
-    --cfg_train_fake 2 \
-    --cfg_eval_fake 2 \
-    --cfg_eval_real 2 \
+    --cfg_train_fake 1.5 \
+    --cfg_eval_fake 1.5 \
+    --cfg_eval_real 1.5 \
     --optimizer 'adam' \
     --data_prompt_text '/data/datasets/aesthetics_6_plus' \
     --resolution 512 \
     --alpha 1 \
     --init_timestep 625 \
     --batch 512 \
-    --fp16 0 \
+    --fp16 1 \
     --batch-gpu 1 \
     --sd_model "benjamin-paine/stable-diffusion-v1-5" \
     --tick 2 \
@@ -83,11 +83,11 @@ if [ "$model" = 'sd1.5' ]; then
     --lr 0.000001 \
     --glr 0.000001 \
     --duration 20 \
-    --enable_xformers 1 \
-    --gradient_checkpointing 1 \
+    --enable_xformers 0 \
+    --gradient_checkpointing 0 \
     --metrics 'fid30k_full' \
-    --ema 0 \
-    --resume 'image_experiment/sid-lsg-train-runs/00000-aesthetics-text_cond-glr1e-06-lr1e-06-initsigma625-gpus8-alpha1.0-batch512-tmax980-fp16/training-state-009626.pt'
+    --ema 0.05
+    # --resume 'image_experiment/sid-lsg-train-runs/00000-aesthetics-text_cond-glr1e-06-lr1e-06-initsigma625-gpus8-alpha1.0-batch512-tmax980-fp16/training-state-009626.pt'
     #--nosubdir  \
     #--metrics 'fid_30k_full' \
     #--metrics 'fid_clip_30k_full' \
