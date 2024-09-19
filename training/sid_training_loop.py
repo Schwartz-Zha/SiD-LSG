@@ -25,6 +25,7 @@ from torch_utils import misc
 import torch.nn as nn
 from functools import partial
 import gc
+import megfile
 
 #Needed for v-prediction based diffusion model
 from diffusers.training_utils import compute_snr
@@ -36,6 +37,8 @@ from metrics import sid_metric_main as metric_main
 from training.sid_sd_util import load_sd15, sid_sd_sampler, sid_sd_denoise
 
 import torch.utils.checkpoint as checkpointing
+
+proj_cloud_dir = 's3://zhajiajun-transfer-data/proj-ckpts/SiD-LSG/'
 
 #----------------------------------------------------------------------------
 def setup_snapshot_image_grid(training_set, random_seed=0):
@@ -116,15 +119,21 @@ def save_image_grid(img, fname, drange, grid_size):
     if C == 3:
         PIL.Image.fromarray(img, 'RGB').save(fname)
 
+    megfile.smart_sync(fname, os.path.join(proj_cloud_dir, fname))
+    megfile.smart_remove(fname)
         
 
 def save_data(data, fname):
     with open(fname, 'wb') as f:
         pickle.dump(data, f)
+    megfile.smart_sync(fname, os.path.join(proj_cloud_dir, fname))
+    megfile.smart_remove(fname)
 
 
 def save_pt(pt, fname):
     torch.save(pt, fname)
+    megfile.smart_sync(fname, os.path.join(proj_cloud_dir, fname))
+    megfile.smart_remove(fname)
 
 
 
