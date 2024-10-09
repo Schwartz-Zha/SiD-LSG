@@ -61,13 +61,13 @@ model=$1
 
 if [ "$model" = 'sd1.5' ]; then
     # Command to run torch with specific parameters
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --standalone --nproc_per_node=4 sid_train.py \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --standalone --nproc_per_node=8 sid_train.py \
     --outdir 'image_experiment/sid-lsg-train-runs/' \
     --data '/data/datasets/MS-COCO-256/val' \
     --train_mode 1 \
-    --cfg_train_fake 2 \
-    --cfg_eval_fake 2 \
-    --cfg_eval_real 2 \
+    --cfg_train_fake 1.5 \
+    --cfg_eval_fake 1.5 \
+    --cfg_eval_real 1.5 \
     --optimizer 'adam' \
     --data_prompt_text '/data/datasets/aesthetics_6_plus' \
     --resolution 512 \
