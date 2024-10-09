@@ -17,3 +17,4 @@ image_experiment/
 *.tar.gz
 *.zip
 .ipynb_checkpoints/
+venv*/
