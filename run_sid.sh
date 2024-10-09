@@ -87,7 +87,7 @@ if [ "$model" = 'sd1.5' ]; then
     --enable_xformers 1 \
     --gradient_checkpointing 1 \
     --metrics 'fid30k_full' \
-    --ema 0 
+    --ema 0.05
     # --resume 'image_experiment/sid-lsg-train-runs/00000-aesthetics-text_cond-glr1e-06-lr1e-06-initsigma625-gpus8-alpha1.0-batch512-tmax980-fp16/training-state-009626.pt'
     #--nosubdir  \
     #--metrics 'fid_30k_full' \
