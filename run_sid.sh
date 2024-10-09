@@ -56,8 +56,8 @@ model=$1
 # --gradient_checkpointing 1
 
 
-# rlaunch --charged-group=monet_video --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash eval_imagenet.sh
-# rlaunch --charged-group=midjourney --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash eval_imagenet.sh
+# rlaunch --charged-group=monet_video --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash run_sid.sh 'sd1.5'
+# rlaunch --charged-group=midjourney --private-machine=group --cpu=64 --gpu=8 --memory=256000 -- bash run_sid.sh 'sd1.5'
 
 if [ "$model" = 'sd1.5' ]; then
     # Command to run torch with specific parameters
