@@ -61,7 +61,7 @@ model=$1
 
 if [ "$model" = 'sd1.5' ]; then
     # Command to run torch with specific parameters
-    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --standalone --nproc_per_node=8 sid_train.py \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --standalone --nproc_per_node=4 sid_train.py \
     --outdir 'image_experiment/sid-lsg-train-runs/' \
     --data '/data/datasets/MS-COCO-256/val' \
     --train_mode 1 \
@@ -86,7 +86,7 @@ if [ "$model" = 'sd1.5' ]; then
     --enable_xformers 1 \
     --gradient_checkpointing 1 \
     --ema 0.05 \
-    --resume 'image_experiment/sid-lsg-train-runs/00000-aesthetics-text_cond-glr1e-06-lr1e-06-initsigma625-gpus8-alpha1.0-batch512-tmax980-fp16/training-state-009626.pt'
+    # --resume 'image_experiment/sid-lsg-train-runs/00000-aesthetics-text_cond-glr1e-06-lr1e-06-initsigma625-gpus8-alpha1.0-batch512-tmax980-fp16/training-state-009626.pt'
     # --metrics 'fid30k_full' \
     #--nosubdir  \
     #--metrics 'fid_30k_full' \

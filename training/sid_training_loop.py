@@ -332,13 +332,15 @@ def training_loop(
     
         else:     
             # Setup GPU parallel computing.
-            dist.print0('Setting up GPU parallel computing')
-            fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
-            G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
             if ema_halflife_kimg>0:
                 G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
             else:
-                G_ema = G.cpu()
+                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
+            torch.distributed.barrier() 
+            dist.print0('Setting up GPU parallel computing')
+            fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
+            G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
+            
     
 
         fake_score_ddp.eval().requires_grad_(False)        
@@ -358,24 +360,24 @@ def training_loop(
         stats_metrics = dict()
 
     
-        if resume_training is None:
-            if dist.get_rank() == 0:
-                print('Exporting sample real images...')
-                save_image_grid(img=images, fname=os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+        # if resume_training is None:
+        #     if dist.get_rank() == 0:
+        #         print('Exporting sample real images...')
+        #         save_image_grid(img=images, fname=os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
                 
-                print('Text prompts for example images:')
-                for c in grid_c:
-                    dist.print0(c)
+        #         print('Text prompts for example images:')
+        #         for c in grid_c:
+        #             dist.print0(c)
                     
                 
-                print('Exporting sample fake images at initialization...')
-                images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
-                                             noise_scheduler=noise_scheduler,
-                                             text_encoder=text_encoder, tokenizer=tokenizer, 
-                                             resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1) for z, c in zip(grid_z, grid_c)]
-                images = torch.cat(images).cpu().numpy()
-                save_image_grid(img=images, fname=os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
-                del images
+        #         print('Exporting sample fake images at initialization...')
+        #         images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+        #                                      noise_scheduler=noise_scheduler,
+        #                                      text_encoder=text_encoder, tokenizer=tokenizer, 
+        #                                      resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1) for z, c in zip(grid_z, grid_c)]
+        #         images = torch.cat(images).cpu().numpy()
+        #         save_image_grid(img=images, fname=os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+        #         del images
                 
 #             if metrics is not None:    
 #                 for metric in metrics:
@@ -390,13 +392,16 @@ def training_loop(
 #                         print(result_dict.results)
 #                         metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=f'fakes_{alpha:03f}_{cur_nimg//1000:06d}.png', alpha=alpha)          
 #                         stats_metrics.update(result_dict.results)
-            
+        
+        gc.collect()
+        torch.cuda.empty_cache()
+
         torch.distributed.barrier() 
         
         dist.print0('Start Running')
         while True:
-            torch.cuda.empty_cache()
             gc.collect()
+            torch.cuda.empty_cache()
             G_ddp.eval().requires_grad_(False)
             #----------------------------------------------------------------------------------------------
             # Update Fake Score Network
