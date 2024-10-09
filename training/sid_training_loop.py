@@ -214,6 +214,8 @@ def training_loop(
     
     
     dtype=torch.float16 if network_kwargs.use_fp16 else torch.float32
+
+    use_amp = True if network_kwargs.use_amp else False
     
     
     if cfg_train_fake !=1 or cfg_eval_fake != 1 :
@@ -296,7 +298,6 @@ def training_loop(
         true_score.eval().requires_grad_(False).to(device)
         fake_score = copy.deepcopy(true_score).train().requires_grad_(True).to(device)
         G = copy.deepcopy(true_score).train().requires_grad_(True).to(device)
-        # scaler = torch.cuda.amp.GradScaler()
 
         # Enable gradient checkpointing
         if gradient_checkpointing:
@@ -313,6 +314,9 @@ def training_loop(
         dist.print0('Setting up optimizer...')
         fake_score_optimizer = dnnlib.util.construct_class_by_name(params=fake_score.parameters(), **fake_score_optimizer_kwargs) # subclass of torch.optim.Optimizer
         g_optimizer = dnnlib.util.construct_class_by_name(params=G.parameters(), **g_optimizer_kwargs) # subclass of torch.optim.Optimizer
+
+        if use_amp:
+            scaler = torch.cuda.amp.GradScaler()
         
         
         # Resume training from previous snapshot.
@@ -438,41 +442,42 @@ def training_loop(
                 # with torch.cuda.amp.autocast():
                 # Compute loss for fake score network
                 with misc.ddp_sync(fake_score_ddp, (round_idx == num_accumulation_rounds - 1)):
-                    #Denoised fake images (stop generator gradient) under fake score network, using guidance scale: kappa1=cfg_eval_train
-                    noise_fake = sid_sd_denoise(unet=fake_score_ddp,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
-                                                    noise_scheduler=noise_scheduler,
-                                                    text_encoder=text_encoder, tokenizer=tokenizer, 
-                                                    resolution=resolution,dtype=dtype,predict_x0=False,guidance_scale=cfg_train_fake)
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
+                        #Denoised fake images (stop generator gradient) under fake score network, using guidance scale: kappa1=cfg_eval_train
+                        noise_fake = sid_sd_denoise(unet=fake_score_ddp,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
+                                                        noise_scheduler=noise_scheduler,
+                                                        text_encoder=text_encoder, tokenizer=tokenizer, 
+                                                        resolution=resolution,dtype=dtype,predict_x0=False,guidance_scale=cfg_train_fake)
 
-                    nan_mask = torch.isnan(noise_fake).flatten(start_dim=1).any(dim=1)
-                    if noise_scheduler.config.prediction_type == "v_prediction":
-                        target = noise_scheduler.get_velocity(images, noise, timesteps)
-                        nan_mask = nan_mask | torch.isnan(target).flatten(start_dim=1).any(dim=1)
-
-                    # Check if there are any NaN values present
-                    if nan_mask.any():
-                        # Invert the nan_mask to get a mask of samples without NaNs
-                        non_nan_mask = ~nan_mask
-                        # Filter out samples with NaNs from y_real and y_fake
-                        noise_fake = noise_fake[non_nan_mask]
-                        noise = noise[non_nan_mask]
+                        nan_mask = torch.isnan(noise_fake).flatten(start_dim=1).any(dim=1)
                         if noise_scheduler.config.prediction_type == "v_prediction":
-                            target = target[non_nan_mask]
-                    
-                    if noise_scheduler.config.prediction_type == "v_prediction":
-                        loss = (noise_fake-target)**2
-                        snr = compute_snr(noise_scheduler, timesteps)
-                        loss = loss * snr/(snr+1)
-                    else:
-                        loss = (noise_fake-noise)**2
+                            target = noise_scheduler.get_velocity(images, noise, timesteps)
+                            nan_mask = nan_mask | torch.isnan(target).flatten(start_dim=1).any(dim=1)
 
-                    loss=loss.sum().mul(loss_scaling / batch_gpu_total)
-                    
-                    del images
+                        # Check if there are any NaN values present
+                        if nan_mask.any():
+                            # Invert the nan_mask to get a mask of samples without NaNs
+                            non_nan_mask = ~nan_mask
+                            # Filter out samples with NaNs from y_real and y_fake
+                            noise_fake = noise_fake[non_nan_mask]
+                            noise = noise[non_nan_mask]
+                            if noise_scheduler.config.prediction_type == "v_prediction":
+                                target = target[non_nan_mask]
+                        
+                        if noise_scheduler.config.prediction_type == "v_prediction":
+                            loss = (noise_fake-target)**2
+                            snr = compute_snr(noise_scheduler, timesteps)
+                            loss = loss * snr/(snr+1)
+                        else:
+                            loss = (noise_fake-noise)**2
+
+                        loss=loss.sum().mul(loss_scaling / batch_gpu_total)
+                        
+                        del images
                     
                     if len(noise) > 0:
                         # loss.backward()
-                        loss.backward()
+                        scaler.scale(loss).backward()
   
                
             loss_fake_score_print = loss.item()
@@ -485,9 +490,9 @@ def training_loop(
                 if param.grad is not None:
                     torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
         
-            fake_score_optimizer.step()
-            # scaler.step(fake_score_optimizer)
-            # scaler.update()
+            # fake_score_optimizer.step()
+            scaler.step(fake_score_optimizer)
+            scaler.update()
             
     
             #----------------------------------------------------------------------------------------------
@@ -511,57 +516,57 @@ def training_loop(
                 init_timesteps = init_timestep * torch.ones((len(contexts),), device=device, dtype=torch.long)
                 timesteps = torch.randint(tmin, tmax, (len(contexts),), device=device, dtype=torch.long)
                 
-                # with torch.cuda.amp.autocast():
-                # Generate fake images (track generator gradient)
-                with misc.ddp_sync(G_ddp, (round_idx == num_accumulation_rounds - 1)):
-                    images = sid_sd_sampler(unet=G_ddp,latents=z,contexts=contexts,init_timesteps=init_timesteps,
-                                        noise_scheduler=noise_scheduler,
-                                        text_encoder=text_encoder, tokenizer=tokenizer, 
-                                        resolution=resolution,dtype=dtype,return_images=False,num_steps=num_steps)
-                
-                # Compute loss for generator    
-                with misc.ddp_sync(fake_score_ddp, False): 
-                    #Denoised fake images (track generator gradient) under fake score network, using guidance scale: kappa2=kappa3=cfg_eval_fake
-                    y_fake = sid_sd_denoise(unet=fake_score_ddp,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
+                with torch.cuda.amp.autocast():
+                    # Generate fake images (track generator gradient)
+                    with misc.ddp_sync(G_ddp, (round_idx == num_accumulation_rounds - 1)):
+                        images = sid_sd_sampler(unet=G_ddp,latents=z,contexts=contexts,init_timesteps=init_timesteps,
                                             noise_scheduler=noise_scheduler,
                                             text_encoder=text_encoder, tokenizer=tokenizer, 
-                                            resolution=resolution,dtype=dtype,guidance_scale=cfg_eval_fake)
-
-
-                    #Denoised fake images (track generator gradient) under pretrained score network, using guidance scale: kappa4=cfg_eval_real  
-                    y_real = sid_sd_denoise(unet=true_score,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
-                                    noise_scheduler=noise_scheduler,
-                                    text_encoder=text_encoder, tokenizer=tokenizer, 
-                                    resolution=resolution,dtype=dtype,guidance_scale=cfg_eval_real)
+                                            resolution=resolution,dtype=dtype,return_images=False,num_steps=num_steps)
                     
-                    nan_mask_images = torch.isnan(images).flatten(start_dim=1).any(dim=1)
-                    nan_mask_y_real = torch.isnan(y_real).flatten(start_dim=1).any(dim=1)
-                    nan_mask_y_fake = torch.isnan(y_fake).flatten(start_dim=1).any(dim=1)
-                    nan_mask = nan_mask_images | nan_mask_y_real | nan_mask_y_fake
+                    # Compute loss for generator    
+                    with misc.ddp_sync(fake_score_ddp, False): 
+                        #Denoised fake images (track generator gradient) under fake score network, using guidance scale: kappa2=kappa3=cfg_eval_fake
+                        y_fake = sid_sd_denoise(unet=fake_score_ddp,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
+                                                noise_scheduler=noise_scheduler,
+                                                text_encoder=text_encoder, tokenizer=tokenizer, 
+                                                resolution=resolution,dtype=dtype,guidance_scale=cfg_eval_fake)
 
-                    # Check if there are any NaN values present
-                    if nan_mask.any():
-                        # Invert the nan_mask to get a mask of samples without NaNs
-                        non_nan_mask = ~nan_mask
-                        # Filter out samples with NaNs from y_real and y_fake
-                        images = images[non_nan_mask]
-                        y_real = y_real[non_nan_mask]
-                        y_fake = y_fake[non_nan_mask]
 
-                    with torch.no_grad():
-                        weight_factor = abs(images.to(torch.float32) - y_real.to(torch.float32)).mean(dim=[1, 2, 3], keepdim=True).clip(min=0.00001)
+                        #Denoised fake images (track generator gradient) under pretrained score network, using guidance scale: kappa4=cfg_eval_real  
+                        y_real = sid_sd_denoise(unet=true_score,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
+                                        noise_scheduler=noise_scheduler,
+                                        text_encoder=text_encoder, tokenizer=tokenizer, 
+                                        resolution=resolution,dtype=dtype,guidance_scale=cfg_eval_real)
+                        
+                        nan_mask_images = torch.isnan(images).flatten(start_dim=1).any(dim=1)
+                        nan_mask_y_real = torch.isnan(y_real).flatten(start_dim=1).any(dim=1)
+                        nan_mask_y_fake = torch.isnan(y_fake).flatten(start_dim=1).any(dim=1)
+                        nan_mask = nan_mask_images | nan_mask_y_real | nan_mask_y_fake
 
-                    
-                    if alpha==1:
-                        loss = (y_real - y_fake) * (y_fake - images) / weight_factor
-                    else:
-                        loss = (y_real - y_fake) * ((y_real - images) - alpha * (y_real - y_fake)) / weight_factor
-                                            
-                    loss=loss.sum().mul(loss_scaling_G / batch_gpu_total)
+                        # Check if there are any NaN values present
+                        if nan_mask.any():
+                            # Invert the nan_mask to get a mask of samples without NaNs
+                            non_nan_mask = ~nan_mask
+                            # Filter out samples with NaNs from y_real and y_fake
+                            images = images[non_nan_mask]
+                            y_real = y_real[non_nan_mask]
+                            y_fake = y_fake[non_nan_mask]
+
+                        with torch.no_grad():
+                            weight_factor = abs(images.to(torch.float32) - y_real.to(torch.float32)).mean(dim=[1, 2, 3], keepdim=True).clip(min=0.00001)
+
+                        
+                        if alpha==1:
+                            loss = (y_real - y_fake) * (y_fake - images) / weight_factor
+                        else:
+                            loss = (y_real - y_fake) * ((y_real - images) - alpha * (y_real - y_fake)) / weight_factor
+                                                
+                        loss=loss.sum().mul(loss_scaling_G / batch_gpu_total)
                                                         
                     if len(y_real) > 0:
-                        loss.backward()
-                        # scaler.scale(loss).backward()
+                        # loss.backward()
+                        scaler.scale(loss).backward()
                                                                                
             lossG_print = loss.item()
             training_stats.report('G_Loss/loss', lossG_print)
@@ -577,9 +582,9 @@ def training_loop(
             if dtype == torch.float16 and len(y_real) > 0:
                 torch.nn.utils.clip_grad_value_(G.parameters(), 1) 
                     
-            g_optimizer.step()
-            # scaler.step(g_optimizer)
-            # scaler.update()
+            # g_optimizer.step()
+            scaler.step(g_optimizer)
+            scaler.update()
             
         
     
@@ -629,24 +634,24 @@ def training_loop(
             
             if (snapshot_ticks is not None) and (done or cur_tick % snapshot_ticks == 0 or cur_tick in [2,4,10,20,30,40,50,60,70,80,90,100]):
     
-                dist.print0('Exporting sample images...')
-                if dist.get_rank() == 0:
-                    for num_steps_eval in [1,2,4]:
-                        #While the generator is primarily trained to generate images in a single step, it can also be utilized in a multi-step setting during evaluation.
-                        #To do: Distill a multi-step generator that is optimized for multi-step settings
-                        images = [sid_sd_sampler(unet=G_ema,latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
-                                                 noise_scheduler=noise_scheduler,
-                                                 text_encoder=text_encoder, tokenizer=tokenizer, 
-                                                 resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
-                        images = torch.cat(images).cpu().numpy()
+                # dist.print0('Exporting sample images...')
+                # if dist.get_rank() == 0:
+                #     for num_steps_eval in [1,2,4]:
+                #         #While the generator is primarily trained to generate images in a single step, it can also be utilized in a multi-step setting during evaluation.
+                #         #To do: Distill a multi-step generator that is optimized for multi-step settings
+                #         images = [sid_sd_sampler(unet=G_ema,latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+                #                                  noise_scheduler=noise_scheduler,
+                #                                  text_encoder=text_encoder, tokenizer=tokenizer, 
+                #                                  resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
+                #         images = torch.cat(images).cpu().numpy()
         
-                        # if cur_tick==0:
-                        #     dist.print0(contexts[0])
-                        #     #dist.print0(images[0])
+                #         # if cur_tick==0:
+                #         #     dist.print0(contexts[0])
+                #         #     #dist.print0(images[0])
                         
-                        save_image_grid(img=images, fname=os.path.join(run_dir, f'fakes_{alpha:03f}_{cur_nimg//1000:06d}_{num_steps_eval:d}.png'), drange=[-1,1], grid_size=grid_size)
+                #         save_image_grid(img=images, fname=os.path.join(run_dir, f'fakes_{alpha:03f}_{cur_nimg//1000:06d}_{num_steps_eval:d}.png'), drange=[-1,1], grid_size=grid_size)
                     
-                    del images
+                #     del images
     
                 if cur_tick>0:    
                     dist.print0('Evaluating metrics...')

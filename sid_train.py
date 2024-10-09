@@ -124,6 +124,7 @@ class CommaSeparatedList(click.ParamType):
 # Parameters for SiD
 @click.option('--init_timestep', help='t_init, in [0,999]', metavar='INT', type=int, default=625, show_default=True)
 @click.option('--fp16',          help='Enable mixed-precision training', metavar='BOOL',            type=bool, default=False, show_default=True)
+@click.option('--amp',          help='Enable mixed-precision training', metavar='BOOL',            type=bool, default=False, show_default=True)
 @click.option('--ls',            help='Loss scaling', metavar='FLOAT',                              type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 @click.option('--lsg',           help='Loss scaling G', metavar='FLOAT',                            type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 @click.option('--alpha',         help='L2-alpha*L1', metavar='FLOAT',                               type=click.FloatRange(min=-1000, min_open=True), default=1, show_default=True)
@@ -206,6 +207,9 @@ paper "Long and Short Guidance in Score identity Distillation for One-Step Text-
     c.metrics = opts.metrics
     
     c.resolution=opts.resolution
+
+    if (opts.fp16 == True and opts.amp == True):
+        raise Exception('--fp16 and --amp cannot both be True')
     
     
     
@@ -254,7 +258,7 @@ paper "Long and Short Guidance in Score identity Distillation for One-Step Text-
         raise click.ClickException(f'--data: {err}')
 
 
-    c.network_kwargs.update(use_fp16=opts.fp16)
+    c.network_kwargs.update(use_fp16=opts.fp16, use_amp=opts.amp)
 
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
