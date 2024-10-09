@@ -37,6 +37,9 @@ from training.sid_sd_util import load_sd15, sid_sd_sampler, sid_sd_denoise
 
 import torch.utils.checkpoint as checkpointing
 
+import megfile 
+proj_cloud_dir = 's3://zhajiajun-transfer-data/proj-ckpts/SiD-LSG/'
+
 #----------------------------------------------------------------------------
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
@@ -93,6 +96,8 @@ def save_pil_images_in_grid(image_files, grid_size, output_path):
     
     # Save the final grid image
     grid_image.save(output_path)
+    megfile.smart_sync(output_path, proj_cloud_dir + output_path)
+    megfile.smart_remove(output_path)
 
 #----------------------------------------------------------------------------
 # Helper methods
@@ -115,16 +120,20 @@ def save_image_grid(img, fname, drange, grid_size):
         PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
     if C == 3:
         PIL.Image.fromarray(img, 'RGB').save(fname)
-
+    megfile.smart_sync(fname, proj_cloud_dir + fname)
+    megfile.smart_remove(fname)
         
 
 def save_data(data, fname):
     with open(fname, 'wb') as f:
         pickle.dump(data, f)
-
+    megfile.smart_sync(fname, proj_cloud_dir + fname)
+    megfile.smart_remove(fname)
 
 def save_pt(pt, fname):
     torch.save(pt, fname)
+    megfile.smart_sync(fname, proj_cloud_dir + fname)
+    megfile.smart_remove(fname)
 
 
 
