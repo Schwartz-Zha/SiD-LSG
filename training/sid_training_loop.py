@@ -343,15 +343,16 @@ def training_loop(
             fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
             G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
     
-        else:     
+        else:
+            if ema_halflife_kimg>0:
+                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
+            else:
+                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
+            torch.distributed.barrier()      
             # Setup GPU parallel computing.
             dist.print0('Setting up GPU parallel computing')
             fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
             G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
-            if ema_halflife_kimg>0:
-                G_ema = copy.deepcopy(G).eval().requires_grad_(False).cpu()
-            else:
-                G_ema = G.cpu()
     
 
         fake_score_ddp.eval().requires_grad_(False)        
@@ -371,24 +372,24 @@ def training_loop(
         stats_metrics = dict()
 
     
-        if resume_training is None:
-            if dist.get_rank() == 0:
-                print('Exporting sample real images...')
-                save_image_grid(img=images, fname=os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+        # if resume_training is None:
+        #     if dist.get_rank() == 0:
+        #         print('Exporting sample real images...')
+        #         save_image_grid(img=images, fname=os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
                 
-                print('Text prompts for example images:')
-                for c in grid_c:
-                    dist.print0(c)
+        #         print('Text prompts for example images:')
+        #         for c in grid_c:
+        #             dist.print0(c)
                     
                 
-                print('Exporting sample fake images at initialization...')
-                images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
-                                             noise_scheduler=noise_scheduler,
-                                             text_encoder=text_encoder, tokenizer=tokenizer, 
-                                             resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1) for z, c in zip(grid_z, grid_c)]
-                images = torch.cat(images).cpu().numpy()
-                save_image_grid(img=images, fname=os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
-                del images
+        #         print('Exporting sample fake images at initialization...')
+        #         images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps = init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+        #                                      noise_scheduler=noise_scheduler,
+        #                                      text_encoder=text_encoder, tokenizer=tokenizer, 
+        #                                      resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=1) for z, c in zip(grid_z, grid_c)]
+        #         images = torch.cat(images).cpu().numpy()
+        #         save_image_grid(img=images, fname=os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+        #         del images
                 
 #             if metrics is not None:    
 #                 for metric in metrics:
@@ -403,13 +404,15 @@ def training_loop(
 #                         print(result_dict.results)
 #                         metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=f'fakes_{alpha:03f}_{cur_nimg//1000:06d}.png', alpha=alpha)          
 #                         stats_metrics.update(result_dict.results)
-            
+        
+        gc.collect()
+        torch.cuda.empty_cache()
         torch.distributed.barrier() 
         
         dist.print0('Start Running')
         while True:
-            torch.cuda.empty_cache()
             gc.collect()
+            torch.cuda.empty_cache()
             G_ddp.eval().requires_grad_(False)
             #----------------------------------------------------------------------------------------------
             # Update Fake Score Network
@@ -493,6 +496,11 @@ def training_loop(
             # fake_score_optimizer.step()
             scaler.step(fake_score_optimizer)
             scaler.update()
+
+            # Delete var to save vram
+            del loss
+            gc.collect()
+            torch.cuda.empty_cache()
             
     
             #----------------------------------------------------------------------------------------------
@@ -516,16 +524,20 @@ def training_loop(
                 init_timesteps = init_timestep * torch.ones((len(contexts),), device=device, dtype=torch.long)
                 timesteps = torch.randint(tmin, tmax, (len(contexts),), device=device, dtype=torch.long)
                 
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
-                    # Generate fake images (track generator gradient)
-                    with misc.ddp_sync(G_ddp, (round_idx == num_accumulation_rounds - 1)):
+                
+                # Generate fake images (track generator gradient)
+                with misc.ddp_sync(G_ddp, (round_idx == num_accumulation_rounds - 1)):
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
                         images = sid_sd_sampler(unet=G_ddp,latents=z,contexts=contexts,init_timesteps=init_timesteps,
                                             noise_scheduler=noise_scheduler,
                                             text_encoder=text_encoder, tokenizer=tokenizer, 
                                             resolution=resolution,dtype=dtype,return_images=False,num_steps=num_steps)
-                    
-                    # Compute loss for generator    
-                    with misc.ddp_sync(fake_score_ddp, False): 
+                del z 
+                gc.collect()
+                torch.cuda.empty_cache()
+                # Compute loss for generator    
+                with misc.ddp_sync(fake_score_ddp, False): 
+                    with torch.autocast(device_type='cuda', dtype=torch.float16):
                         #Denoised fake images (track generator gradient) under fake score network, using guidance scale: kappa2=kappa3=cfg_eval_fake
                         y_fake = sid_sd_denoise(unet=fake_score_ddp,images=images,noise=noise,contexts=contexts,timesteps=timesteps,
                                                 noise_scheduler=noise_scheduler,
@@ -564,9 +576,9 @@ def training_loop(
                                                 
                         loss=loss.sum().mul(loss_scaling_G / batch_gpu_total)
                                                         
-                    if len(y_real) > 0:
-                        # loss.backward()
-                        scaler.scale(loss).backward()
+                if len(y_real) > 0:
+                    # loss.backward()
+                    scaler.scale(loss).backward()
                                                                                
             lossG_print = loss.item()
             training_stats.report('G_Loss/loss', lossG_print)
@@ -585,6 +597,11 @@ def training_loop(
             # g_optimizer.step()
             scaler.step(g_optimizer)
             scaler.update()
+        
+            # Del vars to save vram
+            del loss
+            gc.collect()
+            torch.cuda.empty_cache()
             
         
     
@@ -598,7 +615,7 @@ def training_loop(
                 for p_ema, p_true_score in zip(G_ema.parameters(), G.parameters()):
                     #p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
                     with torch.no_grad():  
-                        p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
+                        p_ema.copy_(p_true_score.detach().cpu().lerp(p_ema, ema_beta))
             else:
                 for p_ema, p_true_score in zip(G_ema.parameters(), G.parameters()):
                     #p_ema.copy_(p_true_score.detach().lerp(p_ema, ema_beta))
@@ -679,7 +696,7 @@ def training_loop(
                             stats_metrics.update(result_dict.results)
 
 
-                data = dict(ema=G_ema)
+                data = dict(ema=G_ema.cpu())
                 for key, value in data.items():
                     if isinstance(value, torch.nn.Module):
                         value = copy.deepcopy(value).eval().requires_grad_(False)
