@@ -585,7 +585,10 @@ def training_loop(
             g_optimizer.step()
             # scaler.step(g_optimizer)
             # scaler.update()
-            
+
+            del loss
+            gc.collect()
+            torch.cuda.empty_cache()
         
     
             if ema_halflife_kimg>0:
@@ -637,34 +640,39 @@ def training_loop(
             
             if (snapshot_ticks is not None) and (done or cur_tick % snapshot_ticks == 0 or cur_tick in [2,4,10,20,30,40,50,60,70,80,90,100]):
     
-                dist.print0('Exporting sample images...')
-                if dist.get_rank() == 0:
-                    for num_steps_eval in [1,2,4]:
-                        #While the generator is primarily trained to generate images in a single step, it can also be utilized in a multi-step setting during evaluation.
-                        #To do: Distill a multi-step generator that is optimized for multi-step settings
-                        images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
-                                                 noise_scheduler=noise_scheduler,
-                                                 text_encoder=text_encoder, tokenizer=tokenizer, 
-                                                 resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
-                        images = torch.cat(images).cpu().numpy()
+                # dist.print0('Exporting sample images...')
+                # if dist.get_rank() == 0:
+                #     for num_steps_eval in [1,2,4]:
+                #         #While the generator is primarily trained to generate images in a single step, it can also be utilized in a multi-step setting during evaluation.
+                #         #To do: Distill a multi-step generator that is optimized for multi-step settings
+                #         images = [sid_sd_sampler(unet=G_ema.to(device),latents=z,contexts=c,init_timesteps=init_timestep * torch.ones((len(c),), device=device, dtype=torch.long),
+                #                                  noise_scheduler=noise_scheduler,
+                #                                  text_encoder=text_encoder, tokenizer=tokenizer, 
+                #                                  resolution=resolution,dtype=dtype,return_images=True, vae=vae,num_steps=num_steps,train_sampler=False,num_steps_eval=num_steps_eval) for z, c in zip(grid_z, grid_c)]
+                #         images = torch.cat(images).cpu().numpy()
         
-                        # if cur_tick==0:
-                        #     dist.print0(contexts[0])
-                        #     #dist.print0(images[0])
+                #         # if cur_tick==0:
+                #         #     dist.print0(contexts[0])
+                #         #     #dist.print0(images[0])
                         
-                        save_image_grid(img=images, fname=os.path.join(run_dir, f'fakes_{alpha:03f}_{cur_nimg//1000:06d}_{num_steps_eval:d}.png'), drange=[-1,1], grid_size=grid_size)
+                #         save_image_grid(img=images, fname=os.path.join(run_dir, f'fakes_{alpha:03f}_{cur_nimg//1000:06d}_{num_steps_eval:d}.png'), drange=[-1,1], grid_size=grid_size)
                     
-                    del images
+                #     del images
     
                 if cur_tick>0:    
                     dist.print0('Evaluating metrics...')
                     dist.print0(metric_pt_path)     
                     
                     if metrics is not None:    
+                        # Since we need to move G_ema back to cuda for evaluation
+                        # We have to move others to cpu to free cuda space
+                        true_score = true_score.cpu()
+                        del fake_score_ddp, G_ddp
+                        fake_score = fake_score.cpu()
+                        G = G.cpu()
+                        gc.collect()
+                        torch.cuda.empty_cache()
                         for metric in metrics:
-
-
-
 
                             result_dict = metric_main.calc_metric(metric=metric, metric_pt_path=metric_pt_path, metric_open_clip_path=metric_open_clip_path, metric_clip_path=metric_clip_path,
                                 G=partial(sid_sd_sampler,unet=G_ema.to(device),noise_scheduler=noise_scheduler,
@@ -677,7 +685,18 @@ def training_loop(
                                 metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=f'fakes_{alpha:03f}_{cur_nimg//1000:06d}.png', alpha=alpha)          
 
                             stats_metrics.update(result_dict.results)
-
+                        
+                        G_ema = G_ema.cpu()
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        # Move things back
+                        true_score = true_score.to(device)
+                        G = G.to(device)
+                        fake_score = fake_score.to(device)
+                        fake_score_ddp = torch.nn.parallel.DistributedDataParallel(fake_score, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
+                        G_ddp = torch.nn.parallel.DistributedDataParallel(G, device_ids=[device], broadcast_buffers=False,find_unused_parameters=False)
+                        
+                        
 
                 data = dict(ema=G_ema)
                 for key, value in data.items():

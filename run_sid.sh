@@ -78,7 +78,8 @@ if [ "$model" = 'sd1.5' ]; then
     --batch-gpu 1 \
     --sd_model "benjamin-paine/stable-diffusion-v1-5" \
     --tick 2 \
-    --snap 50 \
+    # --snap 50 \
+    --snap 1 \
     --dump 100 \
     --lr 0.000001 \
     --glr 0.000001 \
